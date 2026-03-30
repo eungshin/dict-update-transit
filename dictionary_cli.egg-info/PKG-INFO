@@ -1,0 +1,7 @@
+Metadata-Version: 2.4
+Name: dictionary-cli
+Version: 0.1.0
+Requires-Python: >=3.11
+Requires-Dist: requests
+Requires-Dist: rich
+Requires-Dist: click

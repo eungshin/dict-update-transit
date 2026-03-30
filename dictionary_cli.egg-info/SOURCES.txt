@@ -1,0 +1,10 @@
+cli.py
+dictionary.py
+pyproject.toml
+dictionary_cli.egg-info/PKG-INFO
+dictionary_cli.egg-info/SOURCES.txt
+dictionary_cli.egg-info/dependency_links.txt
+dictionary_cli.egg-info/entry_points.txt
+dictionary_cli.egg-info/requires.txt
+dictionary_cli.egg-info/top_level.txt
+tests/test_dictionary.py
