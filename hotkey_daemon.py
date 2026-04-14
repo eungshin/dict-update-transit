@@ -216,48 +216,119 @@ _POPUP_FONT_FAMILY = _load_pretendard()
 
 
 class PopupWindow:
-    """Borderless, topmost definition popup positioned near the cursor."""
+    """Modern dark-mode definition popup positioned near the cursor.
 
-    def __init__(self, root: tk.Tk, text: str, x: int, y: int,
-                 font_family: str = "Pretendard Variable", font_size: int = 11) -> None:
+    Design: Dark Mode OLED style — deep black bg, high contrast text,
+    color-coded typography for word/phonetic/POS/definitions/examples.
+    """
+
+    # ── Design tokens (OLED dark, ui-ux-pro-max compliant)
+    _BG       = "#0f1219"   # deep dark
+    _BG_CARD  = "#161b26"   # card surface
+    _BORDER   = "#1e293b"   # subtle border
+    _FG       = "#e2e8f0"   # primary text (slate-200)
+    _FG_MUTED = "#64748b"   # muted text (slate-500)
+    _WORD     = "#f1f5f9"   # word heading (slate-100, bold)
+    _PHONETIC = "#38bdf8"   # phonetic (sky-400)
+    _POS      = "#22c55e"   # part of speech (green-500)
+    _NUM      = "#a78bfa"   # definition number (violet-400)
+    _EXAMPLE  = "#94a3b8"   # example text (slate-400)
+    _DIVIDER  = "#1e293b"   # section divider
+
+    def __init__(self, root: tk.Tk, result: dict | None, x: int, y: int,
+                 font_family: str = "Pretendard Variable",
+                 font_size: int = 11) -> None:
         self.root = root
         self.top = tk.Toplevel(root)
         self.top.overrideredirect(True)
         self.top.attributes("-topmost", True)
-        self.top.attributes("-alpha", 0.95)
+        self.top.attributes("-alpha", 0.97)
+        self.top.configure(bg=self._BG)
 
-        # Padding frame
-        frame = tk.Frame(self.top, bg="#1e1e2e", padx=10, pady=8)
-        frame.pack(fill=tk.BOTH, expand=True)
+        # Shadow frame (outer border glow)
+        shadow = tk.Frame(self.top, bg=self._BORDER, padx=1, pady=1)
+        shadow.pack(fill=tk.BOTH, expand=True)
 
-        # Scrollable text widget (read-only)
-        # Use config font (Pretendard by default) with fallback to Segoe UI
+        inner = tk.Frame(shadow, bg=self._BG, padx=14, pady=10)
+        inner.pack(fill=tk.BOTH, expand=True)
+
+        # Font setup
         actual_family = font_family if font_family in tkfont.families() else _POPUP_FONT_FAMILY
-        popup_font = tkfont.Font(family=actual_family, size=font_size)
+        body_font = tkfont.Font(family=actual_family, size=font_size)
+        word_font = tkfont.Font(family=actual_family, size=font_size + 4, weight="bold")
+        phonetic_font = tkfont.Font(family=actual_family, size=font_size + 1)
+        pos_font = tkfont.Font(family=actual_family, size=font_size, weight="bold")
+        num_font = tkfont.Font(family=actual_family, size=font_size)
+        example_font = tkfont.Font(family=actual_family, size=font_size - 1, slant="italic")
+
+        # Scrollable text widget with tag-based styling
         txt = tk.Text(
-            frame,
-            wrap=tk.WORD,
-            font=popup_font,
-            bg="#1e1e2e",
-            fg="#cdd6f4",
-            relief=tk.FLAT,
-            borderwidth=0,
-            highlightthickness=0,
-            width=50,
+            inner, wrap=tk.WORD, font=body_font,
+            bg=self._BG, fg=self._FG,
+            relief=tk.FLAT, borderwidth=0, highlightthickness=0,
+            width=52, spacing1=2, spacing3=2,
+            cursor="arrow", padx=2, pady=2,
         )
-        txt.insert(tk.END, text)
+
+        # Define text tags for color coding
+        txt.tag_configure("word", font=word_font, foreground=self._WORD,
+                          spacing3=4)
+        txt.tag_configure("phonetic", font=phonetic_font,
+                          foreground=self._PHONETIC, spacing3=6)
+        txt.tag_configure("pos", font=pos_font, foreground=self._POS,
+                          spacing1=8, spacing3=2)
+        txt.tag_configure("divider", foreground=self._DIVIDER,
+                          font=body_font, spacing1=4, spacing3=4)
+        txt.tag_configure("num", font=num_font, foreground=self._NUM)
+        txt.tag_configure("defn", font=body_font, foreground=self._FG,
+                          lmargin1=20, lmargin2=20)
+        txt.tag_configure("example", font=example_font,
+                          foreground=self._EXAMPLE,
+                          lmargin1=28, lmargin2=28, spacing1=1, spacing3=3)
+        txt.tag_configure("notfound", font=body_font,
+                          foreground=self._FG_MUTED)
+
+        # Populate with rich formatting
+        if result is None:
+            txt.insert(tk.END, "Word not found.", "notfound")
+        else:
+            word = result.get("word", "")
+            phonetic = result.get("phonetic")
+
+            txt.insert(tk.END, word, "word")
+            if phonetic:
+                txt.insert(tk.END, f"  {phonetic}", "phonetic")
+            txt.insert(tk.END, "\n")
+
+            for mi, meaning in enumerate(result.get("meanings", [])):
+                pos = meaning.get("part_of_speech", "")
+                if mi > 0:
+                    txt.insert(tk.END, "\u2500" * 36 + "\n", "divider")
+                txt.insert(tk.END, f"{pos}\n", "pos")
+
+                for di, defn in enumerate(meaning.get("definitions", []), 1):
+                    definition_text = defn.get("definition", "")
+                    txt.insert(tk.END, f" {di}. ", "num")
+                    txt.insert(tk.END, f"{definition_text}\n", "defn")
+
+                    example = defn.get("example")
+                    if example:
+                        txt.insert(tk.END, f'  "{example}"\n', "example")
+
         txt.configure(state=tk.DISABLED)
 
-        # Compute height based on line count
+        # Compute height
         line_count = int(txt.index(tk.END).split(".")[0])
-        line_h = popup_font.metrics("linespace")
-        raw_h = line_count * line_h + 20
-        popup_h = max(100, min(raw_h, POPUP_MAX_HEIGHT))
+        line_h = body_font.metrics("linespace")
+        raw_h = line_count * line_h + 28
+        popup_h = max(80, min(raw_h, POPUP_MAX_HEIGHT))
 
         if raw_h > POPUP_MAX_HEIGHT:
-            scrollbar = tk.Scrollbar(frame, command=txt.yview)
+            scrollbar = tk.Scrollbar(inner, command=txt.yview,
+                                     bg=self._BG, troughcolor=self._BG_CARD,
+                                     highlightthickness=0, borderwidth=0)
             txt.configure(yscrollcommand=scrollbar.set)
-            scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+            scrollbar.pack(side=tk.RIGHT, fill=tk.Y, padx=(4, 0))
 
         txt.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
@@ -276,7 +347,6 @@ class PopupWindow:
         logger.info("Popup shown at (%d, %d)", cx, cy)
 
     def _on_focus_out(self, event: tk.Event) -> None:  # type: ignore[type-arg]
-        # Only dismiss when the Toplevel itself loses focus, not child widgets
         if event.widget is self.top:
             self.dismiss()
 
@@ -454,167 +524,254 @@ class HotkeyDaemon:
     def _show_settings(self) -> None:
         """Open a modern CustomTkinter settings dialog on the main thread."""
         import customtkinter as ctk
+        import os as _os
 
         ctk.set_appearance_mode("dark")
         ctk.set_default_color_theme("green")
 
         GEMINI_VOICES = ["Kore", "Puck", "Charon", "Fenrir", "Aoede", "Leda", "Orus", "Zephyr"]
+        VOICE_DESC = {
+            "Kore": "Female, warm", "Puck": "Male, friendly",
+            "Charon": "Male, deep", "Fenrir": "Male, strong",
+            "Aoede": "Female, bright", "Leda": "Female, calm",
+            "Orus": "Male, clear", "Zephyr": "Female, soft",
+        }
         FONT_OPTIONS = ["Pretendard Variable", "Segoe UI", "Consolas", "Arial", "Malgun Gothic"]
-        ACCENT = "#22C55E"
-        ACCENT2 = "#16A34A"
-        MUTED = "#94A3B8"
+
+        # ── Design tokens
+        BG_DARK   = "#0f1219"
+        CARD_BG   = "#161b26"
+        CARD_BDR  = "#1e293b"
+        ACCENT    = "#22C55E"
+        ACCENT2   = "#16A34A"
+        ACCENT_DIM = "#134e2a"
+        BLUE      = "#38BDF8"
+        MUTED     = "#64748b"
+        FG        = "#e2e8f0"
+        WARN      = "#f59e0b"
 
         win = ctk.CTkToplevel(self.root)
         win.title("Dict Tool — Settings")
-        win.geometry("460x720")
+        win.geometry("480x760")
         win.resizable(False, True)
         win.attributes("-topmost", True)
+        win.configure(fg_color=BG_DARK)
         win.grab_set()
 
         # ────────────────────────────────────────────
         # Title bar
         # ────────────────────────────────────────────
-        title_frame = ctk.CTkFrame(win, height=50, corner_radius=0,
-                                   fg_color=("gray86", "#1a1a2e"))
+        title_frame = ctk.CTkFrame(win, height=56, corner_radius=0,
+                                   fg_color=CARD_BG, border_width=0)
         title_frame.pack(fill="x")
         title_frame.pack_propagate(False)
-        ctk.CTkLabel(title_frame, text="  Settings",
-                     font=ctk.CTkFont(size=16, weight="bold")).pack(
-                         side="left", padx=16)
+
+        title_left = ctk.CTkFrame(title_frame, fg_color="transparent")
+        title_left.pack(side="left", padx=20, fill="y")
+        ctk.CTkLabel(title_left, text="Settings",
+                     font=ctk.CTkFont(size=18, weight="bold"),
+                     text_color=FG).pack(side="left", pady=14)
+        ctk.CTkLabel(title_left, text="  Dict Tool",
+                     font=ctk.CTkFont(size=12),
+                     text_color=MUTED).pack(side="left", pady=14)
 
         # ────────────────────────────────────────────
         # Scrollable body
         # ────────────────────────────────────────────
-        body = ctk.CTkScrollableFrame(win, fg_color="transparent")
+        body = ctk.CTkScrollableFrame(win, fg_color="transparent",
+                                      scrollbar_button_color=CARD_BDR,
+                                      scrollbar_button_hover_color=MUTED)
         body.pack(fill="both", expand=True, padx=0, pady=0)
 
-        def section_header(parent, text):
-            ctk.CTkLabel(parent, text=text,
-                         font=ctk.CTkFont(size=11, weight="bold"),
-                         text_color="#38BDF8").pack(
-                             fill="x", padx=20, pady=(16, 2), anchor="w")
-            ctk.CTkFrame(parent, height=1, fg_color="#334155").pack(
-                fill="x", padx=20, pady=(0, 8))
+        # ── Helpers
+        def card(parent):
+            c = ctk.CTkFrame(parent, fg_color=CARD_BG, corner_radius=12,
+                             border_width=1, border_color=CARD_BDR)
+            c.pack(fill="x", padx=16, pady=(0, 12))
+            return c
 
-        def labeled_row(parent, label_text):
+        def section_header(parent, icon, text):
+            hdr = ctk.CTkFrame(parent, fg_color="transparent")
+            hdr.pack(fill="x", padx=16, pady=(18, 6))
+            ctk.CTkLabel(hdr, text=f"{icon}  {text}",
+                         font=ctk.CTkFont(size=12, weight="bold"),
+                         text_color=BLUE).pack(side="left")
+
+        def labeled_row(parent, label_text, padx=16, pady=6):
             row = ctk.CTkFrame(parent, fg_color="transparent")
-            row.pack(fill="x", padx=20, pady=4)
-            ctk.CTkLabel(row, text=label_text, width=90, anchor="w",
-                         font=ctk.CTkFont(size=13)).pack(side="left")
+            row.pack(fill="x", padx=padx, pady=pady)
+            ctk.CTkLabel(row, text=label_text, anchor="w",
+                         font=ctk.CTkFont(size=13),
+                         text_color=FG).pack(side="left")
             return row
+
+        def sub_label(parent, text, padx=16):
+            ctk.CTkLabel(parent, text=text,
+                         font=ctk.CTkFont(size=10),
+                         text_color=MUTED, anchor="w").pack(
+                             fill="x", padx=padx, pady=(0, 8))
 
         # ────────────────────────────────────────────
         # Section 1: Features
         # ────────────────────────────────────────────
-        section_header(body, "FEATURES")
+        section_header(body, "\u25ce", "FEATURES")
+        feat_card = card(body)
 
-        pron_row = labeled_row(body, "발음 읽기 (TTS)")
-        pronunciation_var = ctk.StringVar(value="on" if self._config.get("pronunciation", True) else "off")
+        pron_row = labeled_row(feat_card, "발음 읽기 (TTS)")
+        pronunciation_var = ctk.StringVar(
+            value="on" if self._config.get("pronunciation", True) else "off")
         ctk.CTkSwitch(pron_row, text="", variable=pronunciation_var,
                       onvalue="on", offvalue="off",
                       button_color=ACCENT, button_hover_color=ACCENT2,
+                      progress_color=ACCENT_DIM,
                       width=46).pack(side="right")
 
-        ai_row = labeled_row(body, "AI 문맥 의미 선택")
-        ai_var = ctk.StringVar(value="on" if self._config.get("ai_enabled", True) else "off")
+        ai_row = labeled_row(feat_card, "AI 문맥 의미 선택")
+        ai_var = ctk.StringVar(
+            value="on" if self._config.get("ai_enabled", True) else "off")
         ctk.CTkSwitch(ai_row, text="", variable=ai_var,
                       onvalue="on", offvalue="off",
                       button_color=ACCENT, button_hover_color=ACCENT2,
+                      progress_color=ACCENT_DIM,
                       width=46).pack(side="right")
 
         # ────────────────────────────────────────────
         # Section 2: TTS Engine
         # ────────────────────────────────────────────
-        section_header(body, "TTS ENGINE")
+        section_header(body, "\u266b", "TTS ENGINE")
+        tts_card = card(body)
 
-        engine_row = labeled_row(body, "엔진")
+        engine_row = labeled_row(tts_card, "엔진")
         engine_var = ctk.StringVar(value=self._config.get("tts_engine", "pyttsx3"))
-
-        # Conditional panels
-        pyttsx3_frame = ctk.CTkFrame(body, fg_color=("gray90", "#1e293b"),
-                                     corner_radius=8)
-        gemini_frame = ctk.CTkFrame(body, fg_color=("gray90", "#1e293b"),
-                                    corner_radius=8)
-
-        def _on_engine_change(value):
-            if value == "pyttsx3":
-                pyttsx3_frame.pack(fill="x", padx=20, pady=(4, 8))
-                gemini_frame.pack_forget()
-            else:
-                pyttsx3_frame.pack_forget()
-                gemini_frame.pack(fill="x", padx=20, pady=(4, 8))
 
         engine_seg = ctk.CTkSegmentedButton(
             engine_row, values=["pyttsx3", "gemini"],
-            variable=engine_var, command=_on_engine_change,
+            variable=engine_var,
             font=ctk.CTkFont(size=12),
             selected_color=ACCENT, selected_hover_color=ACCENT2,
+            unselected_color=CARD_BDR, unselected_hover_color="#2d3748",
             width=200)
         engine_seg.pack(side="right")
+
+        # Conditional panels (packed inside tts_card)
+        pyttsx3_frame = ctk.CTkFrame(tts_card, fg_color="transparent")
+        gemini_frame = ctk.CTkFrame(tts_card, fg_color="transparent")
+
+        def _on_engine_change(value):
+            if value == "pyttsx3":
+                gemini_frame.pack_forget()
+                pyttsx3_frame.pack(fill="x", padx=4, pady=(4, 8))
+            else:
+                pyttsx3_frame.pack_forget()
+                gemini_frame.pack(fill="x", padx=4, pady=(4, 8))
+
+        engine_seg.configure(command=_on_engine_change)
 
         # ── pyttsx3 sub-panel
         spd_var = tk.IntVar(value=int(self._config.get("tts_rate", 150)))
         vol_var = tk.IntVar(value=int(self._config.get("tts_volume", 100)))
 
         spd_row = ctk.CTkFrame(pyttsx3_frame, fg_color="transparent")
-        spd_row.pack(fill="x", padx=12, pady=(10, 4))
+        spd_row.pack(fill="x", padx=12, pady=(8, 4))
         ctk.CTkLabel(spd_row, text="속도", width=50, anchor="w",
-                     font=ctk.CTkFont(size=12)).pack(side="left")
+                     font=ctk.CTkFont(size=12), text_color=FG).pack(side="left")
         spd_val_label = ctk.CTkLabel(spd_row, text=str(spd_var.get()), width=36,
                                      font=ctk.CTkFont(size=12, weight="bold"),
                                      text_color=ACCENT)
         spd_val_label.pack(side="right")
-        spd_slider = ctk.CTkSlider(spd_row, from_=80, to=250,
-                                   number_of_steps=34,
-                                   button_color=ACCENT, button_hover_color=ACCENT2,
-                                   command=lambda v: (spd_var.set(int(v)),
-                                                      spd_val_label.configure(text=str(int(v)))))
+        spd_slider = ctk.CTkSlider(
+            spd_row, from_=80, to=250, number_of_steps=34,
+            button_color=ACCENT, button_hover_color=ACCENT2,
+            progress_color=ACCENT_DIM,
+            command=lambda v: (spd_var.set(int(v)),
+                               spd_val_label.configure(text=str(int(v)))))
         spd_slider.set(spd_var.get())
         spd_slider.pack(side="left", fill="x", expand=True, padx=(8, 8))
 
         vol_row_f = ctk.CTkFrame(pyttsx3_frame, fg_color="transparent")
-        vol_row_f.pack(fill="x", padx=12, pady=(4, 10))
+        vol_row_f.pack(fill="x", padx=12, pady=(4, 8))
         ctk.CTkLabel(vol_row_f, text="볼륨", width=50, anchor="w",
-                     font=ctk.CTkFont(size=12)).pack(side="left")
+                     font=ctk.CTkFont(size=12), text_color=FG).pack(side="left")
         vol_val_label = ctk.CTkLabel(vol_row_f, text=str(vol_var.get()), width=36,
                                      font=ctk.CTkFont(size=12, weight="bold"),
                                      text_color=ACCENT)
         vol_val_label.pack(side="right")
-        vol_slider = ctk.CTkSlider(vol_row_f, from_=0, to=100,
-                                   number_of_steps=20,
-                                   button_color=ACCENT, button_hover_color=ACCENT2,
-                                   command=lambda v: (vol_var.set(int(v)),
-                                                      vol_val_label.configure(text=str(int(v)))))
+        vol_slider = ctk.CTkSlider(
+            vol_row_f, from_=0, to=100, number_of_steps=20,
+            button_color=ACCENT, button_hover_color=ACCENT2,
+            progress_color=ACCENT_DIM,
+            command=lambda v: (vol_var.set(int(v)),
+                               vol_val_label.configure(text=str(int(v)))))
         vol_slider.set(vol_var.get())
         vol_slider.pack(side="left", fill="x", expand=True, padx=(8, 8))
 
         # ── Gemini sub-panel
-        voice_row = ctk.CTkFrame(gemini_frame, fg_color="transparent")
-        voice_row.pack(fill="x", padx=12, pady=10)
-        ctk.CTkLabel(voice_row, text="음성", width=50, anchor="w",
-                     font=ctk.CTkFont(size=12)).pack(side="left")
         voice_var = ctk.StringVar(value=self._config.get("gemini_voice_name", "Kore"))
-        ctk.CTkOptionMenu(voice_row, values=GEMINI_VOICES,
-                          variable=voice_var,
-                          font=ctk.CTkFont(size=12),
-                          button_color=ACCENT, button_hover_color=ACCENT2,
-                          width=160).pack(side="right")
 
-        gemini_hint = ctk.CTkLabel(gemini_frame,
-                                   text="GEMINI_API_KEY를 .env에 설정하세요",
-                                   font=ctk.CTkFont(size=10),
-                                   text_color=MUTED)
-        gemini_hint.pack(padx=12, pady=(0, 10), anchor="w")
+        voice_row = ctk.CTkFrame(gemini_frame, fg_color="transparent")
+        voice_row.pack(fill="x", padx=12, pady=(8, 2))
+        ctk.CTkLabel(voice_row, text="음성", width=50, anchor="w",
+                     font=ctk.CTkFont(size=12), text_color=FG).pack(side="left")
 
-        # Show initial engine panel
+        voice_desc_label = ctk.CTkLabel(
+            voice_row, text=VOICE_DESC.get(voice_var.get(), ""),
+            font=ctk.CTkFont(size=10), text_color=MUTED, width=90)
+        voice_desc_label.pack(side="right", padx=(0, 8))
+
+        def _on_voice_change(val):
+            voice_desc_label.configure(text=VOICE_DESC.get(val, ""))
+
+        ctk.CTkOptionMenu(
+            voice_row, values=GEMINI_VOICES, variable=voice_var,
+            font=ctk.CTkFont(size=12), command=_on_voice_change,
+            button_color=ACCENT, button_hover_color=ACCENT2,
+            fg_color=CARD_BDR, dropdown_fg_color=CARD_BG,
+            dropdown_hover_color=CARD_BDR,
+            width=140).pack(side="right")
+
+        # Preview button
+        preview_row = ctk.CTkFrame(gemini_frame, fg_color="transparent")
+        preview_row.pack(fill="x", padx=12, pady=(2, 4))
+
+        def _preview_voice():
+            preview_btn.configure(text="Playing...", state="disabled")
+            win.update_idletasks()
+            import threading
+            def _play():
+                try:
+                    self._config["gemini_voice_name"] = voice_var.get()
+                    self._speak_gemini("dictionary")
+                except Exception:
+                    pass
+                win.after(0, lambda: preview_btn.configure(
+                    text="Preview", state="normal"))
+            threading.Thread(target=_play, daemon=True).start()
+
+        preview_btn = ctk.CTkButton(
+            preview_row, text="Preview", command=_preview_voice,
+            font=ctk.CTkFont(size=11),
+            fg_color=CARD_BDR, hover_color="#2d3748",
+            text_color=FG, corner_radius=6,
+            width=80, height=28)
+        preview_btn.pack(side="left")
+
+        # API key status
+        has_key = bool(_os.environ.get("GEMINI_API_KEY", "").strip())
+        key_color = ACCENT if has_key else WARN
+        key_text = "API Key: Connected" if has_key else "GEMINI_API_KEY not set in .env"
+        ctk.CTkLabel(gemini_frame, text=key_text,
+                     font=ctk.CTkFont(size=10), text_color=key_color
+                     ).pack(padx=12, pady=(0, 8), anchor="w")
+
         _on_engine_change(engine_var.get())
 
         # ────────────────────────────────────────────
         # Section 3: AI 설명 방식
         # ────────────────────────────────────────────
-        section_header(body, "AI 설명 방식")
+        section_header(body, "\u2726", "AI EXPLANATION")
+        ai_card = card(body)
 
-        lang_row = labeled_row(body, "언어")
+        lang_row = labeled_row(ai_card, "언어")
         lang_var = ctk.StringVar(value=self._config.get("ai_language", "ko"))
         lang_map = {"한국어": "ko", "English": "en", "한영 혼용": "mixed"}
         lang_reverse = {v: k for k, v in lang_map.items()}
@@ -628,9 +785,10 @@ class HotkeyDaemon:
             variable=lang_display, command=_on_lang,
             font=ctk.CTkFont(size=11),
             selected_color=ACCENT, selected_hover_color=ACCENT2,
-            width=240).pack(side="right")
+            unselected_color=CARD_BDR, unselected_hover_color="#2d3748",
+            width=250).pack(side="right")
 
-        style_row = labeled_row(body, "스타일")
+        style_row = labeled_row(ai_card, "스타일")
         style_var = ctk.StringVar(value=self._config.get("ai_style", "detailed"))
         style_map = {"상세": "detailed", "간결": "concise"}
         style_reverse = {v: k for k, v in style_map.items()}
@@ -644,56 +802,63 @@ class HotkeyDaemon:
             variable=style_display, command=_on_style,
             font=ctk.CTkFont(size=11),
             selected_color=ACCENT, selected_hover_color=ACCENT2,
+            unselected_color=CARD_BDR, unselected_hover_color="#2d3748",
             width=140).pack(side="right")
 
         # 추가 지시
-        ctk.CTkLabel(body, text="추가 지시", anchor="w",
+        ctk.CTkLabel(ai_card, text="추가 지시", anchor="w",
                      font=ctk.CTkFont(size=12),
-                     text_color=MUTED).pack(fill="x", padx=20, pady=(8, 2))
-        custom_entry = ctk.CTkTextbox(body, height=70, corner_radius=8,
-                                      font=ctk.CTkFont(size=12),
-                                      border_width=1, border_color="#334155")
-        custom_entry.pack(fill="x", padx=20, pady=(0, 2))
+                     text_color=MUTED).pack(fill="x", padx=16, pady=(8, 2))
+        custom_entry = ctk.CTkTextbox(
+            ai_card, height=70, corner_radius=8,
+            font=ctk.CTkFont(size=12),
+            fg_color=CARD_BDR, border_width=0,
+            text_color=FG)
+        custom_entry.pack(fill="x", padx=16, pady=(0, 4))
         saved_prompt = self._config.get("ai_custom_prompt", "")
         if saved_prompt:
             custom_entry.insert("0.0", saved_prompt)
-
-        ctk.CTkLabel(body, text="예) 어원도 함께 설명해줘 / 반드시 예문 3개 포함해",
-                     font=ctk.CTkFont(size=10),
-                     text_color=MUTED).pack(fill="x", padx=20, anchor="w")
+        sub_label(ai_card, "e.g. 어원도 함께 설명해줘 / 반드시 예문 3개 포함해")
 
         # ────────────────────────────────────────────
         # Section 4: 팝업 폰트
         # ────────────────────────────────────────────
-        section_header(body, "팝업 폰트")
+        section_header(body, "\u2766", "POPUP FONT")
+        font_card = card(body)
 
-        font_row = labeled_row(body, "폰트")
+        font_row = labeled_row(font_card, "폰트")
         font_var = ctk.StringVar(value=self._config.get("popup_font", "Pretendard Variable"))
-        ctk.CTkOptionMenu(font_row, values=FONT_OPTIONS,
-                          variable=font_var,
-                          font=ctk.CTkFont(size=12),
-                          button_color=ACCENT, button_hover_color=ACCENT2,
-                          width=200).pack(side="right")
+        ctk.CTkOptionMenu(
+            font_row, values=FONT_OPTIONS, variable=font_var,
+            font=ctk.CTkFont(size=12),
+            button_color=ACCENT, button_hover_color=ACCENT2,
+            fg_color=CARD_BDR, dropdown_fg_color=CARD_BG,
+            dropdown_hover_color=CARD_BDR,
+            width=200).pack(side="right")
 
-        size_row = labeled_row(body, "크기")
+        size_row = labeled_row(font_card, "크기")
         size_var = tk.IntVar(value=int(self._config.get("popup_font_size", 11)))
-        size_val_label = ctk.CTkLabel(size_row, text=f"{size_var.get()} pt", width=44,
-                                      font=ctk.CTkFont(size=12, weight="bold"),
-                                      text_color=ACCENT)
+        size_val_label = ctk.CTkLabel(
+            size_row, text=f"{size_var.get()} pt", width=44,
+            font=ctk.CTkFont(size=12, weight="bold"), text_color=ACCENT)
         size_val_label.pack(side="right")
-        size_slider = ctk.CTkSlider(size_row, from_=8, to=20,
-                                    number_of_steps=12,
-                                    button_color=ACCENT, button_hover_color=ACCENT2,
-                                    command=lambda v: (size_var.set(int(v)),
-                                                       size_val_label.configure(text=f"{int(v)} pt")))
+        size_slider = ctk.CTkSlider(
+            size_row, from_=8, to=20, number_of_steps=12,
+            button_color=ACCENT, button_hover_color=ACCENT2,
+            progress_color=ACCENT_DIM,
+            command=lambda v: (size_var.set(int(v)),
+                               size_val_label.configure(text=f"{int(v)} pt")))
         size_slider.set(size_var.get())
         size_slider.pack(side="left", fill="x", expand=True, padx=(0, 8))
+
+        # Bottom spacer
+        ctk.CTkFrame(body, height=8, fg_color="transparent").pack()
 
         # ────────────────────────────────────────────
         # Bottom button bar
         # ────────────────────────────────────────────
-        btn_bar = ctk.CTkFrame(win, height=60, corner_radius=0,
-                               fg_color=("gray86", "#1a1a2e"))
+        btn_bar = ctk.CTkFrame(win, height=64, corner_radius=0,
+                               fg_color=CARD_BG, border_width=0)
         btn_bar.pack(fill="x", side="bottom")
         btn_bar.pack_propagate(False)
 
@@ -716,17 +881,20 @@ class HotkeyDaemon:
             save_btn.configure(text="  Saved!", fg_color=ACCENT2)
             win.after(600, win.destroy)
 
-        save_btn = ctk.CTkButton(btn_bar, text="Save", command=_save,
-                                 font=ctk.CTkFont(size=13, weight="bold"),
-                                 fg_color=ACCENT, hover_color=ACCENT2,
-                                 corner_radius=8, width=120, height=36)
-        save_btn.pack(side="right", padx=16, pady=12)
+        save_btn = ctk.CTkButton(
+            btn_bar, text="Save", command=_save,
+            font=ctk.CTkFont(size=14, weight="bold"),
+            fg_color=ACCENT, hover_color=ACCENT2,
+            corner_radius=10, width=130, height=40)
+        save_btn.pack(side="right", padx=20, pady=12)
 
-        ctk.CTkButton(btn_bar, text="Cancel", command=win.destroy,
-                      font=ctk.CTkFont(size=13),
-                      fg_color="transparent", hover_color="#334155",
-                      text_color=MUTED, corner_radius=8,
-                      width=90, height=36).pack(side="right", pady=12)
+        ctk.CTkButton(
+            btn_bar, text="Cancel", command=win.destroy,
+            font=ctk.CTkFont(size=13),
+            fg_color="transparent", hover_color=CARD_BDR,
+            text_color=MUTED, corner_radius=10,
+            border_width=1, border_color=CARD_BDR,
+            width=90, height=40).pack(side="right", pady=12)
 
         win.focus_force()
 
@@ -838,12 +1006,7 @@ class HotkeyDaemon:
     # ------------------------------------------------------------------
 
     def _show_popup(self, result: dict | None) -> None:
-        if result is None:
-            text = "Word not found."
-            word = ""
-        else:
-            text = format_definition(result)
-            word = result.get("word", "")
+        word = result.get("word", "") if result else ""
 
         # Cursor position for popup placement (offset slightly below cursor)
         pt = POINT()
@@ -851,7 +1014,7 @@ class HotkeyDaemon:
         x, y = pt.x + 10, pt.y + 20
 
         self._popup = PopupWindow(
-            self.root, text, x, y,
+            self.root, result, x, y,
             font_family=self._config.get("popup_font", "Pretendard Variable"),
             font_size=int(self._config.get("popup_font_size", 11)),
         )
