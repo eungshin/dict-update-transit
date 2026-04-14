@@ -10,10 +10,17 @@ dependencies = [
     "requests",
     "rich",
     "click",
+    "openai",
+    "pyttsx3",
+    "pystray",
+    "Pillow",
+    "google-genai",
+    "customtkinter",
 ]
 
 [project.scripts]
 dict = "cli:main"
+dict-daemon = "hotkey_daemon:main"
 
 [tool.setuptools]
-py-modules = ["cli", "dictionary"]
+py-modules = ["cli", "dictionary", "hotkey_daemon", "ai_context", "config"]
