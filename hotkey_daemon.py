@@ -885,6 +885,7 @@ class HotkeyDaemon:
         try:
             import os
             import tempfile
+            import wave
             import winsound
             from google import genai
             from google.genai import types
@@ -913,10 +914,13 @@ class HotkeyDaemon:
                 ),
             )
 
-            audio_data = response.candidates[0].content.parts[0].inline_data.data
-            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
-                tmp.write(audio_data)
-                tmp_path = tmp.name
+            pcm_data = response.candidates[0].content.parts[0].inline_data.data
+            tmp_path = os.path.join(tempfile.gettempdir(), "dict_gemini_tts.wav")
+            with wave.open(tmp_path, "wb") as wf:
+                wf.setnchannels(1)
+                wf.setsampwidth(2)   # 16-bit PCM
+                wf.setframerate(24000)
+                wf.writeframes(pcm_data)
 
             winsound.PlaySound(tmp_path, winsound.SND_FILENAME)
             os.unlink(tmp_path)
