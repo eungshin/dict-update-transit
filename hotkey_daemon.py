@@ -44,14 +44,58 @@ from ai_context import pick_definition, explain_phrase
 from config import ensure_config
 
 # ---------------------------------------------------------------------------
-# Logging
+# Logging — file + stderr.
+# pythonw.exe (used by start_daemon.bat) has no console, so stderr is null.
+# A RotatingFileHandler writes to %APPDATA%/dict-tool/daemon.log so the
+# daemon's behavior is always inspectable.
 # ---------------------------------------------------------------------------
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(message)s",
-)
+import os
+from logging.handlers import RotatingFileHandler as _RotatingFileHandler
+
+
+def _log_path() -> Path:
+    appdata = os.environ.get("APPDATA", str(Path.home()))
+    return Path(appdata) / "dict-tool" / "daemon.log"
+
+
+def _setup_logging() -> Path:
+    log_file = _log_path()
+    try:
+        log_file.parent.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+
+    fmt = logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
+
+    root = logging.getLogger()
+    root.setLevel(logging.INFO)
+
+    for h in list(root.handlers):
+        root.removeHandler(h)
+
+    try:
+        fh = _RotatingFileHandler(
+            log_file, maxBytes=1_000_000, backupCount=3, encoding="utf-8"
+        )
+        fh.setFormatter(fmt)
+        root.addHandler(fh)
+    except Exception as exc:
+        sh = logging.StreamHandler()
+        sh.setFormatter(fmt)
+        root.addHandler(sh)
+        root.warning("Could not open log file %s: %s", log_file, exc)
+        return log_file
+
+    sh = logging.StreamHandler()
+    sh.setFormatter(fmt)
+    root.addHandler(sh)
+    return log_file
+
+
+_LOG_FILE = _setup_logging()
 logger = logging.getLogger(__name__)
+logger.info("=== daemon starting; log file: %s ===", _LOG_FILE)
 
 # ---------------------------------------------------------------------------
 # Constants
