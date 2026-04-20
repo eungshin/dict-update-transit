@@ -25,13 +25,27 @@ lookup_word return shape (hard contract — do not change field names):
 
 from __future__ import annotations
 
+from functools import lru_cache
+
 import requests
 
 API_BASE = "https://api.dictionaryapi.dev/api/v2/entries/en"
 REQUEST_TIMEOUT = 10  # seconds
+CACHE_SIZE = 256
+
+
+@lru_cache(maxsize=CACHE_SIZE)
+def _cached_lookup(word: str) -> dict | None:
+    return _lookup_word_uncached(word)
 
 
 def lookup_word(word: str) -> dict | None:
+    if not isinstance(word, str) or not word.strip():
+        return None
+    return _cached_lookup(word.strip().lower())
+
+
+def _lookup_word_uncached(word: str) -> dict | None:
     """Call the Free Dictionary API and return normalized data for *word*.
 
     Returns None when:
@@ -41,11 +55,6 @@ def lookup_word(word: str) -> dict | None:
     Raises requests.RequestException for connectivity failures or unexpected
     HTTP errors (anything other than 200 and 404).
     """
-    if not isinstance(word, str) or not word.strip():
-        return None
-
-    word = word.strip()
-
     response = requests.get(f"{API_BASE}/{word}", timeout=REQUEST_TIMEOUT)
 
     if response.status_code == 404:

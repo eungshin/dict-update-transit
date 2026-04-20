@@ -58,8 +58,8 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 HOTKEY_ID: int = 1           # Win32 RegisterHotKey identifier
-CLIPBOARD_WAIT_MS: int = 150  # ms to wait after keybd_event before reading clipboard
-POLL_INTERVAL_MS: int = 50   # ms between WM_HOTKEY polls in root.after()
+CLIPBOARD_WAIT_MS: int = 100  # ms to wait after keybd_event before reading clipboard
+POLL_INTERVAL_MS: int = 20   # ms between WM_HOTKEY polls in root.after()
 POPUP_WIDTH: int = 420        # popup window width in pixels
 POPUP_MAX_HEIGHT: int = 300   # popup window max height in pixels
 
@@ -934,6 +934,7 @@ class HotkeyDaemon:
             self._popup = None
 
         self._saved_clipboard = self._save_clipboard()
+        self._clear_clipboard()
         self._inject_ctrl_c()
         self.root.after(CLIPBOARD_WAIT_MS, self._read_clipboard_and_lookup)
 
@@ -941,6 +942,7 @@ class HotkeyDaemon:
         text = self._read_clipboard()
         if text is None:
             logger.info("Clipboard empty after capture — skipping")
+            self._restore_clipboard(self._saved_clipboard)
             return
 
         word = extract_word(text)
@@ -1132,6 +1134,16 @@ class HotkeyDaemon:
         except Exception as exc:
             logger.warning("Could not read clipboard: %s", exc)
         return None
+
+    def _clear_clipboard(self) -> None:
+        try:
+            win32clipboard.OpenClipboard()
+            try:
+                win32clipboard.EmptyClipboard()
+            finally:
+                win32clipboard.CloseClipboard()
+        except Exception as exc:
+            logger.warning("Could not clear clipboard: %s", exc)
 
     # ------------------------------------------------------------------
     # Inject Ctrl+C via keybd_event
