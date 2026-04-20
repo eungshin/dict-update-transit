@@ -9,13 +9,14 @@ from __future__ import annotations
 import pytest
 
 from hotkey_daemon import (
-    CLIPBOARD_WAIT_MS,
+    DOUBLE_PRESS_WINDOW_MS,
     HOTKEY_ID,
     POLL_INTERVAL_MS,
     POPUP_MAX_HEIGHT,
     POPUP_WIDTH,
     clamp_position,
     extract_word,
+    is_double_press,
 )
 
 
@@ -28,11 +29,11 @@ class TestConstants:
     def test_hotkey_id(self):
         assert HOTKEY_ID == 1
 
-    def test_clipboard_wait_ms(self):
-        assert CLIPBOARD_WAIT_MS == 100
-
     def test_poll_interval_ms(self):
         assert POLL_INTERVAL_MS == 20
+
+    def test_double_press_window_ms(self):
+        assert DOUBLE_PRESS_WINDOW_MS == 400
 
     def test_popup_width(self):
         assert POPUP_WIDTH == 420
@@ -227,3 +228,40 @@ class TestClampPositionNegative:
     def test_large_negative_coordinates(self):
         x, y = clamp_position(-9999, -9999, W, H, SCREEN_W, SCREEN_H)
         assert (x, y) == (0, 0)
+
+
+# ---------------------------------------------------------------------------
+# is_double_press — boundary tests
+# ---------------------------------------------------------------------------
+
+
+class TestIsDoublePress:
+    def test_no_previous_press(self):
+        assert is_double_press(1000, 0, 400) is False
+
+    def test_negative_last_returns_false(self):
+        assert is_double_press(1000, -10, 400) is False
+
+    def test_within_window(self):
+        assert is_double_press(1300, 1000, 400) is True
+
+    def test_at_exact_window_boundary(self):
+        assert is_double_press(1400, 1000, 400) is True
+
+    def test_one_ms_past_window(self):
+        assert is_double_press(1401, 1000, 400) is False
+
+    def test_well_past_window(self):
+        assert is_double_press(5000, 1000, 400) is False
+
+    def test_zero_delta_rejected(self):
+        """Same timestamp = same event echoed; should not double-fire."""
+        assert is_double_press(1000, 1000, 400) is False
+
+    def test_negative_delta_rejected(self):
+        """Clock skew or wraparound — never treat as double press."""
+        assert is_double_press(900, 1000, 400) is False
+
+    def test_one_ms_after(self):
+        """Even 1ms is a double press if within window."""
+        assert is_double_press(1001, 1000, 400) is True

@@ -1,19 +1,30 @@
 """
 hotkey_daemon.py — System-wide hotkey daemon for CLI Dictionary.
 
-Architecture overview:
-- Main thread: Tkinter mainloop + Win32 hotkey polling via root.after()
-- Worker thread: lookup_word() calls, results pushed onto a queue.Queue
-- WM_HOTKEY intercepted via PeekMessageW (ctypes) in after() callback
-- SendInput (ctypes) injects Ctrl+C; clipboard read after CLIPBOARD_WAIT_MS
-- Clipboard save/restore around capture to avoid clobbering user data
+Triggers:
+- Double Ctrl+C (within DOUBLE_PRESS_WINDOW_MS) — primary, observation only
+  via WH_KEYBOARD_LL hook. Bypasses anti-keylogger software (Wizvera, TouchEn,
+  PowerToys keyboard hooks) because no synthetic input is generated.
+- Ctrl+Shift+D — secondary, registered via RegisterHotKey. Reads whatever the
+  user has already copied to the clipboard.
+
+Both triggers feed the same lookup path: read existing clipboard, extract
+word, dispatch async lookup, show popup.
+
+Architecture:
+- Main thread: Tkinter mainloop + queue polling via root.after()
+- Hotkey listener thread: GetMessage on WM_HOTKEY
+- Keyboard hook thread: WH_KEYBOARD_LL low-level hook + message pump
+- Worker thread: per-lookup, results pushed onto a queue.Queue
 
 Public pure functions (no Win32/Tk dependencies, fully unit-testable):
     extract_word(text: str) -> str | None
     clamp_position(x, y, w, h, screen_w, screen_h) -> tuple[int, int]
+    is_double_press(now_ms, last_ms, window_ms) -> bool
 
-Module constants consumed by both T01 (tests) and T02 (daemon):
-    HOTKEY_ID, CLIPBOARD_WAIT_MS, POLL_INTERVAL_MS, POPUP_WIDTH, POPUP_MAX_HEIGHT
+Module constants consumed by tests:
+    HOTKEY_ID, POLL_INTERVAL_MS, POPUP_WIDTH, POPUP_MAX_HEIGHT,
+    DOUBLE_PRESS_WINDOW_MS
 """
 
 from __future__ import annotations
@@ -101,16 +112,23 @@ logger.info("=== daemon starting; log file: %s ===", _LOG_FILE)
 # Constants
 # ---------------------------------------------------------------------------
 
-HOTKEY_ID: int = 1           # Win32 RegisterHotKey identifier
-CLIPBOARD_WAIT_MS: int = 100  # ms to wait after keybd_event before reading clipboard
-POLL_INTERVAL_MS: int = 20   # ms between WM_HOTKEY polls in root.after()
+HOTKEY_ID: int = 1            # Win32 RegisterHotKey identifier
+POLL_INTERVAL_MS: int = 20    # ms between queue polls in root.after()
 POPUP_WIDTH: int = 420        # popup window width in pixels
 POPUP_MAX_HEIGHT: int = 300   # popup window max height in pixels
+DOUBLE_PRESS_WINDOW_MS: int = 400  # max gap between two Ctrl+C presses
 
 # Win32 constants
 WM_HOTKEY: int = 0x0312
+WM_QUIT: int = 0x0012
+WM_KEYDOWN: int = 0x0100
+WM_SYSKEYDOWN: int = 0x0104
 PM_REMOVE: int = 0x0001
+HC_ACTION: int = 0
+WH_KEYBOARD_LL: int = 13
 VK_D: int = 0x44
+VK_C: int = 0x43
+VK_CONTROL: int = 0x11
 
 # ---------------------------------------------------------------------------
 # ctypes structures for PeekMessageW and SendInput
@@ -134,59 +152,55 @@ class MSG(ctypes.Structure):
     ]
 
 
-# INPUT structures for SendInput
-INPUT_KEYBOARD = 1
-KEYEVENTF_KEYUP = 0x0002
-KEYEVENTF_SCANCODE = 0x0008
-MAPVK_VK_TO_VSC = 0
-VK_CONTROL = 0x11
-VK_C = 0x43
-
-
-class KEYBDINPUT(ctypes.Structure):
+# Low-level keyboard hook structures
+class KBDLLHOOKSTRUCT(ctypes.Structure):
     _fields_ = [
-        ("wVk", ctypes.wintypes.WORD),
-        ("wScan", ctypes.wintypes.WORD),
-        ("dwFlags", ctypes.wintypes.DWORD),
+        ("vkCode", ctypes.wintypes.DWORD),
+        ("scanCode", ctypes.wintypes.DWORD),
+        ("flags", ctypes.wintypes.DWORD),
         ("time", ctypes.wintypes.DWORD),
         ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong)),
     ]
 
 
-class _INPUT_UNION(ctypes.Union):
-    _fields_ = [("ki", KEYBDINPUT)]
-
-
-class INPUT(ctypes.Structure):
-    _fields_ = [("type", ctypes.wintypes.DWORD), ("_input", _INPUT_UNION)]
-
-
-# SendInput / MapVirtualKeyW signatures — set explicitly so 64-bit pointer
-# return values are not truncated.
-user32.SendInput.argtypes = [
-    ctypes.wintypes.UINT,
-    ctypes.POINTER(INPUT),
+LowLevelKeyboardProc = ctypes.WINFUNCTYPE(
+    ctypes.c_long,
     ctypes.c_int,
+    ctypes.wintypes.WPARAM,
+    ctypes.wintypes.LPARAM,
+)
+
+# Hook API signatures
+user32.SetWindowsHookExW.argtypes = [
+    ctypes.c_int,
+    LowLevelKeyboardProc,
+    ctypes.wintypes.HINSTANCE,
+    ctypes.wintypes.DWORD,
 ]
-user32.SendInput.restype = ctypes.wintypes.UINT
-user32.MapVirtualKeyW.argtypes = [ctypes.wintypes.UINT, ctypes.wintypes.UINT]
-user32.MapVirtualKeyW.restype = ctypes.wintypes.UINT
+user32.SetWindowsHookExW.restype = ctypes.wintypes.HHOOK
+user32.UnhookWindowsHookEx.argtypes = [ctypes.wintypes.HHOOK]
+user32.UnhookWindowsHookEx.restype = ctypes.wintypes.BOOL
+user32.CallNextHookEx.argtypes = [
+    ctypes.wintypes.HHOOK,
+    ctypes.c_int,
+    ctypes.wintypes.WPARAM,
+    ctypes.wintypes.LPARAM,
+]
+user32.CallNextHookEx.restype = ctypes.wintypes.LPARAM
+user32.GetAsyncKeyState.argtypes = [ctypes.c_int]
+user32.GetAsyncKeyState.restype = ctypes.c_short
+user32.PostThreadMessageW.argtypes = [
+    ctypes.wintypes.DWORD,
+    ctypes.wintypes.UINT,
+    ctypes.wintypes.WPARAM,
+    ctypes.wintypes.LPARAM,
+]
+user32.PostThreadMessageW.restype = ctypes.wintypes.BOOL
 
-
-def _make_key_input(vk: int, key_up: bool = False) -> INPUT:
-    """Build a single keyboard INPUT event with vk + scan code (more reliable in Chromium)."""
-    scan = user32.MapVirtualKeyW(vk, MAPVK_VK_TO_VSC)
-    flags = KEYEVENTF_KEYUP if key_up else 0
-    inp = INPUT()
-    inp.type = INPUT_KEYBOARD
-    inp._input.ki = KEYBDINPUT(
-        wVk=vk,
-        wScan=scan,
-        dwFlags=flags,
-        time=0,
-        dwExtraInfo=None,
-    )
-    return inp
+_kernel32 = ctypes.windll.kernel32
+_kernel32.GetModuleHandleW.argtypes = [ctypes.wintypes.LPCWSTR]
+_kernel32.GetModuleHandleW.restype = ctypes.wintypes.HMODULE
+_kernel32.GetCurrentThreadId.restype = ctypes.wintypes.DWORD
 
 
 def _foreground_info() -> tuple[str, str]:
@@ -208,6 +222,18 @@ def _foreground_info() -> tuple[str, str]:
 # ---------------------------------------------------------------------------
 # Pure helper functions
 # ---------------------------------------------------------------------------
+
+
+def is_double_press(now_ms: int, last_ms: int, window_ms: int) -> bool:
+    """Return True iff *now_ms* falls within *window_ms* after *last_ms*.
+
+    *last_ms* of 0 means "no previous press recorded" and always returns False.
+    Negative deltas (clock skew, wraparound) also return False.
+    """
+    if last_ms <= 0:
+        return False
+    delta = now_ms - last_ms
+    return 0 < delta <= window_ms
 
 
 def extract_word(text: str) -> str | None:
@@ -461,7 +487,6 @@ class HotkeyDaemon:
         self.root.withdraw()  # hidden root window
         self._queue: queue.Queue[dict | None] = queue.Queue()
         self._popup: PopupWindow | None = None
-        self._saved_clipboard: str | None = None
         self._config = ensure_config()
         self._tray = None
         self._paused = False
@@ -476,12 +501,15 @@ class HotkeyDaemon:
         self._hotkey_queue: queue.Queue[bool] = queue.Queue()
         self._stop_event = threading.Event()
         self._hotkey_ready = threading.Event()
+        self._hook_thread_id: int = 0
+        self._last_ctrl_c_ms: int = 0
 
         listener = threading.Thread(target=self._hotkey_listener, daemon=True)
         listener.start()
-
-        # Wait for listener thread to register hotkey before continuing
         self._hotkey_ready.wait(timeout=3.0)
+
+        hook_thread = threading.Thread(target=self._keyboard_hook_thread, daemon=True)
+        hook_thread.start()
 
         try:
             self._start_tray()
@@ -489,12 +517,66 @@ class HotkeyDaemon:
             self.root.mainloop()
         finally:
             self._stop_event.set()
+            # Break the hook thread's GetMessage loop so it can exit cleanly.
+            if self._hook_thread_id:
+                user32.PostThreadMessageW(self._hook_thread_id, WM_QUIT, 0, 0)
             if self._tray is not None:
                 try:
                     self._tray.stop()
                 except Exception:
                     pass
             logger.info("Daemon stopped.")
+
+    def _keyboard_hook_thread(self) -> None:
+        """Install WH_KEYBOARD_LL hook and pump messages.
+
+        Detects two Ctrl+C presses within DOUBLE_PRESS_WINDOW_MS and pushes
+        a trigger onto _hotkey_queue. The hook only observes events; it never
+        synthesises input, so anti-keylogger drivers (Wizvera, TouchEn, etc.)
+        do not block it.
+        """
+        self._hook_thread_id = _kernel32.GetCurrentThreadId()
+
+        def _proc(nCode, wParam, lParam):
+            if nCode == HC_ACTION and wParam in (WM_KEYDOWN, WM_SYSKEYDOWN):
+                kb = ctypes.cast(lParam, ctypes.POINTER(KBDLLHOOKSTRUCT))[0]
+                if kb.vkCode == VK_C:
+                    ctrl_held = user32.GetAsyncKeyState(VK_CONTROL) & 0x8000
+                    if ctrl_held:
+                        now_ms = int(kb.time)
+                        if is_double_press(now_ms, self._last_ctrl_c_ms, DOUBLE_PRESS_WINDOW_MS):
+                            logger.info("Double Ctrl+C detected (gap=%dms)",
+                                        now_ms - self._last_ctrl_c_ms)
+                            self._hotkey_queue.put(True)
+                            self._last_ctrl_c_ms = 0
+                        else:
+                            self._last_ctrl_c_ms = now_ms
+            return user32.CallNextHookEx(None, nCode, wParam, lParam)
+
+        # Keep callback alive for the lifetime of the hook.
+        self._hook_proc_ref = LowLevelKeyboardProc(_proc)
+
+        h_module = _kernel32.GetModuleHandleW(None)
+        hook_id = user32.SetWindowsHookExW(
+            WH_KEYBOARD_LL, self._hook_proc_ref, h_module, 0
+        )
+        if not hook_id:
+            err = ctypes.get_last_error()
+            logger.error("SetWindowsHookExW failed (error=%d) — double Ctrl+C disabled", err)
+            return
+
+        logger.info("Double Ctrl+C hook installed (window=%dms)", DOUBLE_PRESS_WINDOW_MS)
+
+        msg = MSG()
+        while not self._stop_event.is_set():
+            ret = user32.GetMessageW(ctypes.byref(msg), None, 0, 0)
+            if ret <= 0:
+                break
+            user32.TranslateMessage(ctypes.byref(msg))
+            user32.DispatchMessageW(ctypes.byref(msg))
+
+        user32.UnhookWindowsHookEx(hook_id)
+        logger.info("Keyboard hook removed")
 
     def _hotkey_listener(self) -> None:
         """Dedicated thread: registers hotkey and blocks on GetMessage."""
@@ -1018,34 +1100,30 @@ class HotkeyDaemon:
 
     def _on_hotkey(self) -> None:
         if self._paused:
-            logger.info("Hotkey triggered but daemon is paused — skipping")
+            logger.info("Trigger received but daemon is paused — skipping")
             return
         if self._popup is not None:
             self._popup.dismiss()
             self._popup = None
 
-        self._saved_clipboard = self._save_clipboard()
-        self._clear_clipboard()
-        self._inject_ctrl_c()
-        self.root.after(CLIPBOARD_WAIT_MS, self._read_clipboard_and_lookup)
+        cls, title = _foreground_info()
+        logger.info("Trigger fired. Foreground: class=%r title=%.60s", cls, title)
+        self._read_clipboard_and_lookup()
 
     def _read_clipboard_and_lookup(self) -> None:
         text = self._read_clipboard()
         if text is None:
-            logger.info("Clipboard empty after capture — skipping")
-            self._restore_clipboard(self._saved_clipboard)
+            logger.info("Clipboard empty — copy a word first (Ctrl+C), then press the trigger again")
             return
 
         word = extract_word(text)
         if word is None:
             logger.info("Clipboard text not a single word (%r) — skipping", text[:40])
-            self._restore_clipboard(self._saved_clipboard)
             return
 
         logger.info("Looking up: %r", word)
         # Keep raw clipboard text as sentence context (may be multi-word)
         sentence = text if text != word else word
-        self._restore_clipboard(self._saved_clipboard)
 
         # Background lookup — result goes onto queue
         def _lookup() -> None:
@@ -1186,33 +1264,8 @@ class HotkeyDaemon:
             self._speak_pyttsx3(word)
 
     # ------------------------------------------------------------------
-    # Clipboard helpers
+    # Clipboard reader (no synthesis — daemon never writes the clipboard)
     # ------------------------------------------------------------------
-
-    def _save_clipboard(self) -> str | None:
-        try:
-            win32clipboard.OpenClipboard()
-            try:
-                if win32clipboard.IsClipboardFormatAvailable(win32clipboard.CF_UNICODETEXT):
-                    return win32clipboard.GetClipboardData(win32clipboard.CF_UNICODETEXT)
-            finally:
-                win32clipboard.CloseClipboard()
-        except Exception as exc:
-            logger.warning("Could not save clipboard: %s", exc)
-        return None
-
-    def _restore_clipboard(self, text: str | None) -> None:
-        if text is None:
-            return
-        try:
-            win32clipboard.OpenClipboard()
-            try:
-                win32clipboard.EmptyClipboard()
-                win32clipboard.SetClipboardData(win32clipboard.CF_UNICODETEXT, text)
-            finally:
-                win32clipboard.CloseClipboard()
-        except Exception as exc:
-            logger.warning("Could not restore clipboard: %s", exc)
 
     def _read_clipboard(self) -> str | None:
         try:
@@ -1225,47 +1278,6 @@ class HotkeyDaemon:
         except Exception as exc:
             logger.warning("Could not read clipboard: %s", exc)
         return None
-
-    def _clear_clipboard(self) -> None:
-        try:
-            win32clipboard.OpenClipboard()
-            try:
-                win32clipboard.EmptyClipboard()
-            finally:
-                win32clipboard.CloseClipboard()
-        except Exception as exc:
-            logger.warning("Could not clear clipboard: %s", exc)
-
-    # ------------------------------------------------------------------
-    # Inject Ctrl+C via SendInput
-    # ------------------------------------------------------------------
-
-    def _inject_ctrl_c(self) -> None:
-        """Inject Ctrl+C using SendInput.
-
-        SendInput (vs the legacy keybd_event) is required for Chromium-based
-        apps (Chrome, Edge, VS Code, Electron). keybd_event events with no
-        scan code are silently dropped by Chromium's input filter.
-        """
-        cls, title = _foreground_info()
-        logger.info("Foreground window: class=%r title=%.60s", cls, title)
-
-        events = (INPUT * 4)(
-            _make_key_input(VK_CONTROL),
-            _make_key_input(VK_C),
-            _make_key_input(VK_C, key_up=True),
-            _make_key_input(VK_CONTROL, key_up=True),
-        )
-        sent = user32.SendInput(4, events, ctypes.sizeof(INPUT))
-        if sent != 4:
-            err = ctypes.get_last_error()
-            logger.warning(
-                "SendInput delivered %d/4 events (last_error=%d) — target may be elevated",
-                sent,
-                err,
-            )
-        else:
-            logger.info("Ctrl+C injected via SendInput (4 events)")
 
 
 # ---------------------------------------------------------------------------
