@@ -93,7 +93,10 @@ class MSG(ctypes.Structure):
 # INPUT structures for SendInput
 INPUT_KEYBOARD = 1
 KEYEVENTF_KEYUP = 0x0002
+KEYEVENTF_SCANCODE = 0x0008
+MAPVK_VK_TO_VSC = 0
 VK_CONTROL = 0x11
+VK_C = 0x43
 
 
 class KEYBDINPUT(ctypes.Structure):
@@ -112,6 +115,50 @@ class _INPUT_UNION(ctypes.Union):
 
 class INPUT(ctypes.Structure):
     _fields_ = [("type", ctypes.wintypes.DWORD), ("_input", _INPUT_UNION)]
+
+
+# SendInput / MapVirtualKeyW signatures — set explicitly so 64-bit pointer
+# return values are not truncated.
+user32.SendInput.argtypes = [
+    ctypes.wintypes.UINT,
+    ctypes.POINTER(INPUT),
+    ctypes.c_int,
+]
+user32.SendInput.restype = ctypes.wintypes.UINT
+user32.MapVirtualKeyW.argtypes = [ctypes.wintypes.UINT, ctypes.wintypes.UINT]
+user32.MapVirtualKeyW.restype = ctypes.wintypes.UINT
+
+
+def _make_key_input(vk: int, key_up: bool = False) -> INPUT:
+    """Build a single keyboard INPUT event with vk + scan code (more reliable in Chromium)."""
+    scan = user32.MapVirtualKeyW(vk, MAPVK_VK_TO_VSC)
+    flags = KEYEVENTF_KEYUP if key_up else 0
+    inp = INPUT()
+    inp.type = INPUT_KEYBOARD
+    inp._input.ki = KEYBDINPUT(
+        wVk=vk,
+        wScan=scan,
+        dwFlags=flags,
+        time=0,
+        dwExtraInfo=None,
+    )
+    return inp
+
+
+def _foreground_info() -> tuple[str, str]:
+    """Return (class_name, window_title) of the current foreground window."""
+    try:
+        hwnd = user32.GetForegroundWindow()
+        if not hwnd:
+            return ("", "")
+        cls_buf = ctypes.create_unicode_buffer(256)
+        user32.GetClassNameW(hwnd, cls_buf, 256)
+        title_len = user32.GetWindowTextLengthW(hwnd)
+        title_buf = ctypes.create_unicode_buffer(title_len + 1)
+        user32.GetWindowTextW(hwnd, title_buf, title_len + 1)
+        return (cls_buf.value, title_buf.value)
+    except Exception:
+        return ("", "")
 
 
 # ---------------------------------------------------------------------------
@@ -1146,20 +1193,35 @@ class HotkeyDaemon:
             logger.warning("Could not clear clipboard: %s", exc)
 
     # ------------------------------------------------------------------
-    # Inject Ctrl+C via keybd_event
+    # Inject Ctrl+C via SendInput
     # ------------------------------------------------------------------
 
     def _inject_ctrl_c(self) -> None:
-        import win32api
-        import win32con as _wc
-        try:
-            win32api.keybd_event(_wc.VK_CONTROL, 0, 0, 0)           # Ctrl down
-            win32api.keybd_event(0x43, 0, 0, 0)                      # C down
-            win32api.keybd_event(0x43, 0, _wc.KEYEVENTF_KEYUP, 0)   # C up
-            win32api.keybd_event(_wc.VK_CONTROL, 0, _wc.KEYEVENTF_KEYUP, 0)  # Ctrl up
-            logger.info("Ctrl+C injected via keybd_event")
-        except Exception as exc:
-            logger.warning("keybd_event failed: %s", exc)
+        """Inject Ctrl+C using SendInput.
+
+        SendInput (vs the legacy keybd_event) is required for Chromium-based
+        apps (Chrome, Edge, VS Code, Electron). keybd_event events with no
+        scan code are silently dropped by Chromium's input filter.
+        """
+        cls, title = _foreground_info()
+        logger.info("Foreground window: class=%r title=%.60s", cls, title)
+
+        events = (INPUT * 4)(
+            _make_key_input(VK_CONTROL),
+            _make_key_input(VK_C),
+            _make_key_input(VK_C, key_up=True),
+            _make_key_input(VK_CONTROL, key_up=True),
+        )
+        sent = user32.SendInput(4, events, ctypes.sizeof(INPUT))
+        if sent != 4:
+            err = ctypes.get_last_error()
+            logger.warning(
+                "SendInput delivered %d/4 events (last_error=%d) — target may be elevated",
+                sent,
+                err,
+            )
+        else:
+            logger.info("Ctrl+C injected via SendInput (4 events)")
 
 
 # ---------------------------------------------------------------------------
