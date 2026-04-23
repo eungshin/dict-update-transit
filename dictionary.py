@@ -4,30 +4,39 @@ dictionary.py — Core library for CLI Dictionary.
 Public boundary contract (consumed by S02 and S03):
     lookup_word(word: str) -> dict | None
     format_definition(result: dict) -> str
+    suggest(word: str, limit: int = 5) -> list[str]
 
-lookup_word return shape (hard contract — do not change field names):
+lookup_word return shape:
     {
         "word": str,
         "phonetic": str | None,
+        "source": str,                 # "api" | "cache" | "wordnet"
         "meanings": [
             {
                 "part_of_speech": str,
                 "definitions": [
-                    {
-                        "definition": str,
-                        "example": str | None,
-                    }
+                    {"definition": str, "example": str | None}
                 ],
+                "synonyms": [str, ...],
+                "antonyms": [str, ...],
             }
         ],
     }
+
+Backwards compatibility: every pre-existing key name and type is preserved.
+The added fields (`source`, `synonyms`, `antonyms`) are optional extensions
+that older consumers can ignore.
 """
 
 from __future__ import annotations
 
+import difflib
+import logging
 from functools import lru_cache
 
 import requests
+
+logger = logging.getLogger(__name__)
 
 API_BASE = "https://api.dictionaryapi.dev/api/v2/entries/en"
 REQUEST_TIMEOUT = 10  # seconds
@@ -40,9 +49,38 @@ def _cached_lookup(word: str) -> dict | None:
 
 
 def lookup_word(word: str) -> dict | None:
+    """Look up *word* with a 3-tier fallback chain.
+
+    1. SQLite history cache (skipped if history is disabled or uninitialized)
+    2. Free Dictionary API (in-memory LRU layered on top)
+    3. WordNet offline dictionary (if the optional nltk package is installed)
+
+    Returns None for blank input or when the word is genuinely not found in
+    any tier. Re-raises requests.RequestException only when all offline
+    fallbacks also fail.
+    """
     if not isinstance(word, str) or not word.strip():
         return None
-    return _cached_lookup(word.strip().lower())
+    norm = word.strip().lower()
+
+    # Tier 1 — SQLite history cache
+    cached = _history_get_cached(norm)
+    if cached is not None:
+        return {**cached, "source": "cache"}
+
+    # Tier 2 — Free Dictionary API (wrapped in in-memory LRU)
+    try:
+        result = _cached_lookup(norm)
+    except requests.RequestException:
+        # Tier 3 — WordNet offline
+        wn_result = _wordnet_lookup(norm)
+        if wn_result is not None:
+            return wn_result
+        raise
+
+    if result is not None:
+        result = dict(result, source="api")
+    return result
 
 
 def _lookup_word_uncached(word: str) -> dict | None:
@@ -90,6 +128,8 @@ def _lookup_word_uncached(word: str) -> dict | None:
             {
                 "part_of_speech": part_of_speech,
                 "definitions": definitions,
+                "synonyms": list(raw_meaning.get("synonyms", []) or []),
+                "antonyms": list(raw_meaning.get("antonyms", []) or []),
             }
         )
 
@@ -101,14 +141,9 @@ def _lookup_word_uncached(word: str) -> dict | None:
 
 
 def format_definition(result: dict) -> str:
-    """Format a lookup_word result dict into a plain multi-line string.
-
-    Returns a plain str (not a rich renderable) so S02 can embed it in a
-    popup without requiring a terminal.
-    """
+    """Format a lookup_word result dict into a plain multi-line string."""
     lines: list[str] = []
 
-    # Header: word + optional phonetic
     word = result.get("word", "")
     phonetic = result.get("phonetic")
     if phonetic:
@@ -129,4 +164,78 @@ def format_definition(result: dict) -> str:
             if example:
                 lines.append(f'     Example: "{example}"')
 
+        synonyms = meaning.get("synonyms") or []
+        antonyms = meaning.get("antonyms") or []
+        if synonyms:
+            lines.append(f"     Synonyms: {', '.join(synonyms)}")
+        if antonyms:
+            lines.append(f"     Antonyms: {', '.join(antonyms)}")
+
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Did-you-mean
+# ---------------------------------------------------------------------------
+
+
+def suggest(word: str, limit: int = 5) -> list[str]:
+    """Return close-match suggestions for *word*.
+
+    Pulls candidate words from user history and (if installed) the WordNet
+    lexicon, then uses difflib to rank by similarity. Returns an empty list
+    when no candidates score high enough or when no source is available.
+    """
+    if not isinstance(word, str) or not word.strip():
+        return []
+    target = word.strip().lower()
+    candidates: set[str] = set()
+
+    # From user's own history — cheap and zero-config
+    try:
+        import history  # local module
+        candidates.update(history.known_words())
+    except Exception:
+        pass
+
+    # From WordNet if available
+    try:
+        import offline_dict
+        if offline_dict.is_available():
+            candidates.update(offline_dict.known_words_sample(20000))
+    except Exception:
+        pass
+
+    # Drop exact match itself so suggestions are actually new
+    candidates.discard(target)
+
+    if not candidates:
+        return []
+
+    return difflib.get_close_matches(target, candidates, n=max(1, int(limit)), cutoff=0.7)
+
+
+# ---------------------------------------------------------------------------
+# Internal hooks — kept as private helpers so the module stays importable
+# even when history.py or offline_dict.py are not set up yet.
+# ---------------------------------------------------------------------------
+
+
+def _history_get_cached(word: str) -> dict | None:
+    try:
+        import history
+        if not history.is_enabled():
+            return None
+        return history.get_cached(word)
+    except Exception:
+        return None
+
+
+def _wordnet_lookup(word: str) -> dict | None:
+    try:
+        import offline_dict
+        if not offline_dict.is_available():
+            return None
+        return offline_dict.lookup(word)
+    except Exception:
+        return None

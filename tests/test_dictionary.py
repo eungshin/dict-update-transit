@@ -36,6 +36,8 @@ MINIMAL_RESULT = {
                     "example": "he passed the test",
                 }
             ],
+            "synonyms": [],
+            "antonyms": [],
         }
     ],
 }
@@ -52,6 +54,8 @@ NO_PHONETIC_RESULT = {
                     "example": None,
                 }
             ],
+            "synonyms": [],
+            "antonyms": [],
         }
     ],
 }
@@ -66,12 +70,16 @@ MULTI_MEANING_RESULT = {
                 {"definition": "move at a speed faster than a walk", "example": "she ran to catch the bus"},
                 {"definition": "manage or be in charge of", "example": None},
             ],
+            "synonyms": [],
+            "antonyms": [],
         },
         {
             "part_of_speech": "noun",
             "definitions": [
                 {"definition": "an act or spell of running", "example": "a run in the park"},
             ],
+            "synonyms": [],
+            "antonyms": [],
         },
     ],
 }
@@ -137,7 +145,9 @@ class TestLookupWordUnit:
         mock_resp = _mock_response(200, API_HELLO_RESPONSE)
         with patch("dictionary.requests.get", return_value=mock_resp):
             result = lookup_word("hello")
-        assert set(result.keys()) == {"word", "phonetic", "meanings"}
+        # Base contract keys are always present; `source` is an added optional
+        # extension that identifies which tier of the fallback chain answered.
+        assert {"word", "phonetic", "meanings"}.issubset(result.keys())
 
     def test_known_word_word_field(self):
         mock_resp = _mock_response(200, API_HELLO_RESPONSE)
@@ -163,7 +173,7 @@ class TestLookupWordUnit:
         with patch("dictionary.requests.get", return_value=mock_resp):
             result = lookup_word("hello")
         meaning = result["meanings"][0]
-        assert set(meaning.keys()) == {"part_of_speech", "definitions"}
+        assert {"part_of_speech", "definitions"}.issubset(meaning.keys())
 
     def test_definition_has_correct_keys(self):
         mock_resp = _mock_response(200, API_HELLO_RESPONSE)
@@ -375,18 +385,17 @@ class TestBoundaryContract:
         mock_resp = _mock_response(200, API_HELLO_RESPONSE)
         with patch("dictionary.requests.get", return_value=mock_resp):
             result = lookup_word("hello")
-        assert set(result.keys()) == {"word", "phonetic", "meanings"}, (
-            "lookup_word must return exactly keys: word, phonetic, meanings"
-        )
+        # Base contract keys must always be present. `source` is an additive
+        # extension identifying which tier of the fallback chain answered.
+        assert {"word", "phonetic", "meanings"}.issubset(result.keys())
 
     def test_meanings_items_have_exact_keys(self):
         mock_resp = _mock_response(200, API_HELLO_RESPONSE)
         with patch("dictionary.requests.get", return_value=mock_resp):
             result = lookup_word("hello")
         for meaning in result["meanings"]:
-            assert set(meaning.keys()) == {"part_of_speech", "definitions"}, (
-                "Each meaning must have exactly keys: part_of_speech, definitions"
-            )
+            # Base keys always present; synonyms/antonyms are additive.
+            assert {"part_of_speech", "definitions"}.issubset(meaning.keys())
 
     def test_definitions_items_have_exact_keys(self):
         mock_resp = _mock_response(200, API_HELLO_RESPONSE)
@@ -451,7 +460,7 @@ class TestLookupWordIntegration:
     def test_hello_returns_dict_with_correct_keys(self):
         result = lookup_word("hello")
         assert result is not None
-        assert set(result.keys()) == {"word", "phonetic", "meanings"}
+        assert {"word", "phonetic", "meanings"}.issubset(result.keys())
 
     def test_hello_word_field(self):
         result = lookup_word("hello")
@@ -464,3 +473,251 @@ class TestLookupWordIntegration:
     def test_unknown_word_returns_none(self):
         result = lookup_word("xyzzynotaword")
         assert result is None
+
+
+# ---------------------------------------------------------------------------
+# Contract extension: synonyms / antonyms / source
+# ---------------------------------------------------------------------------
+
+
+API_RUN_WITH_SYNANT = [
+    {
+        "word": "run",
+        "phonetic": "/rʌn/",
+        "meanings": [
+            {
+                "partOfSpeech": "verb",
+                "definitions": [
+                    {
+                        "definition": "move at a speed faster than a walk",
+                        "example": "she ran to catch the bus",
+                        "synonyms": ["sprint", "dash"],
+                        "antonyms": ["walk"],
+                    }
+                ],
+                "synonyms": ["sprint", "dash", "race"],
+                "antonyms": ["walk", "crawl"],
+            }
+        ],
+    }
+]
+
+
+class TestContractExtension:
+    def test_source_is_api_on_successful_api_call(self):
+        mock_resp = _mock_response(200, API_HELLO_RESPONSE)
+        with patch("dictionary.requests.get", return_value=mock_resp), \
+             patch("dictionary._history_get_cached", return_value=None):
+            result = lookup_word("hello")
+        assert result["source"] == "api"
+
+    def test_synonyms_extracted_from_meaning_level(self):
+        mock_resp = _mock_response(200, API_RUN_WITH_SYNANT)
+        with patch("dictionary.requests.get", return_value=mock_resp), \
+             patch("dictionary._history_get_cached", return_value=None):
+            result = lookup_word("run")
+        assert result["meanings"][0]["synonyms"] == ["sprint", "dash", "race"]
+
+    def test_antonyms_extracted_from_meaning_level(self):
+        mock_resp = _mock_response(200, API_RUN_WITH_SYNANT)
+        with patch("dictionary.requests.get", return_value=mock_resp), \
+             patch("dictionary._history_get_cached", return_value=None):
+            result = lookup_word("run")
+        assert result["meanings"][0]["antonyms"] == ["walk", "crawl"]
+
+    def test_synonyms_default_to_empty_list_when_absent(self):
+        api_data = [
+            {
+                "word": "empty",
+                "phonetic": "/ɛmpti/",
+                "meanings": [
+                    {
+                        "partOfSpeech": "adj",
+                        "definitions": [{"definition": "containing nothing"}],
+                    }
+                ],
+            }
+        ]
+        mock_resp = _mock_response(200, api_data)
+        with patch("dictionary.requests.get", return_value=mock_resp), \
+             patch("dictionary._history_get_cached", return_value=None):
+            result = lookup_word("empty")
+        assert result["meanings"][0]["synonyms"] == []
+        assert result["meanings"][0]["antonyms"] == []
+
+
+# ---------------------------------------------------------------------------
+# Fallback chain: cache → API → WordNet
+# ---------------------------------------------------------------------------
+
+
+class TestFallbackChain:
+    def test_cache_hit_shortcircuits_api(self):
+        cached_val = {
+            "word": "hello", "phonetic": None, "source": "api",
+            "meanings": [{"part_of_speech": "noun", "definitions": [],
+                          "synonyms": [], "antonyms": []}],
+        }
+        with patch("dictionary._history_get_cached", return_value=cached_val) as hc, \
+             patch("dictionary.requests.get") as req_get:
+            result = lookup_word("hello")
+        hc.assert_called_once_with("hello")
+        req_get.assert_not_called()
+        assert result["source"] == "cache"
+        # Cached result must not have its payload mutated
+        assert result["word"] == "hello"
+
+    def test_wordnet_fallback_on_network_error(self):
+        wn_result = {
+            "word": "offline", "phonetic": None, "source": "wordnet",
+            "meanings": [{"part_of_speech": "noun", "definitions":
+                          [{"definition": "not online", "example": None}],
+                          "synonyms": [], "antonyms": []}],
+        }
+        with patch("dictionary._history_get_cached", return_value=None), \
+             patch("dictionary.requests.get",
+                   side_effect=requests.ConnectionError("no net")), \
+             patch("dictionary._wordnet_lookup", return_value=wn_result):
+            result = lookup_word("offline")
+        assert result["source"] == "wordnet"
+        assert result["word"] == "offline"
+
+    def test_network_error_reraised_when_wordnet_absent(self):
+        with patch("dictionary._history_get_cached", return_value=None), \
+             patch("dictionary.requests.get",
+                   side_effect=requests.ConnectionError("no net")), \
+             patch("dictionary._wordnet_lookup", return_value=None):
+            with pytest.raises(requests.RequestException):
+                lookup_word("anything")
+
+    def test_404_still_returns_none(self):
+        """API 404 must not trigger WordNet — 404 means "no such word"."""
+        mock_resp = _mock_response(404, API_NOT_FOUND_RESPONSE)
+        mock_resp.raise_for_status.side_effect = None
+        with patch("dictionary._history_get_cached", return_value=None), \
+             patch("dictionary.requests.get", return_value=mock_resp), \
+             patch("dictionary._wordnet_lookup") as wn:
+            result = lookup_word("xyzzy")
+        assert result is None
+        wn.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# suggest() — did-you-mean
+# ---------------------------------------------------------------------------
+
+
+class TestSuggest:
+    def test_empty_input_returns_empty_list(self):
+        from dictionary import suggest
+        assert suggest("") == []
+        assert suggest("   ") == []
+
+    def test_no_candidates_returns_empty_list(self, monkeypatch):
+        from dictionary import suggest
+        import history
+        monkeypatch.setattr(history, "known_words", lambda: [])
+        # offline_dict may or may not be importable; suggest must handle it
+        assert suggest("hello") == []
+
+    def test_picks_close_match_from_history(self, monkeypatch):
+        from dictionary import suggest
+        import history
+        monkeypatch.setattr(
+            history, "known_words",
+            lambda: ["receive", "perceive", "deceive", "quantum"],
+        )
+        result = suggest("recieve")  # common misspelling of receive
+        assert "receive" in result
+
+    def test_exact_match_is_excluded(self, monkeypatch):
+        from dictionary import suggest
+        import history
+        monkeypatch.setattr(history, "known_words", lambda: ["hello", "help"])
+        result = suggest("hello")
+        assert "hello" not in result
+
+    def test_respects_limit(self, monkeypatch):
+        from dictionary import suggest
+        import history
+        # Many near-matches
+        monkeypatch.setattr(
+            history, "known_words",
+            lambda: ["test", "tent", "text", "tess", "ted", "rest"],
+        )
+        assert len(suggest("tes", limit=2)) <= 2
+
+
+# ---------------------------------------------------------------------------
+# format_definition with synonyms / antonyms
+# ---------------------------------------------------------------------------
+
+
+class TestFormatDefinitionExtended:
+    def test_synonyms_appear_in_output(self):
+        result = {
+            "word": "big",
+            "phonetic": None,
+            "meanings": [
+                {
+                    "part_of_speech": "adj",
+                    "definitions": [{"definition": "of large size", "example": None}],
+                    "synonyms": ["large", "huge"],
+                    "antonyms": [],
+                }
+            ],
+        }
+        out = format_definition(result)
+        assert "Synonyms" in out
+        assert "large" in out and "huge" in out
+
+    def test_antonyms_appear_in_output(self):
+        result = {
+            "word": "big",
+            "phonetic": None,
+            "meanings": [
+                {
+                    "part_of_speech": "adj",
+                    "definitions": [{"definition": "of large size", "example": None}],
+                    "synonyms": [],
+                    "antonyms": ["small", "tiny"],
+                }
+            ],
+        }
+        out = format_definition(result)
+        assert "Antonyms" in out
+        assert "small" in out
+
+    def test_empty_syn_ant_do_not_appear(self):
+        """Missing/empty lists must not leak 'Synonyms:'/'Antonyms:' labels."""
+        result = {
+            "word": "x",
+            "phonetic": None,
+            "meanings": [
+                {
+                    "part_of_speech": "n",
+                    "definitions": [{"definition": "d", "example": None}],
+                    "synonyms": [],
+                    "antonyms": [],
+                }
+            ],
+        }
+        out = format_definition(result)
+        assert "Synonyms" not in out
+        assert "Antonyms" not in out
+
+    def test_old_shape_without_syn_ant_keys_still_works(self):
+        """Pre-Pillar-2 consumers constructing results without syn/ant keys."""
+        result = {
+            "word": "legacy",
+            "phonetic": None,
+            "meanings": [
+                {
+                    "part_of_speech": "n",
+                    "definitions": [{"definition": "an old thing", "example": None}],
+                }
+            ],
+        }
+        # Must not raise
+        out = format_definition(result)
+        assert "legacy" in out
