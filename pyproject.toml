@@ -18,9 +18,21 @@ dependencies = [
     "customtkinter",
 ]
 
+[project.optional-dependencies]
+offline = ["nltk"]
+local-llm = ["llama-cpp-python>=0.3.0", "huggingface_hub"]
+
 [project.scripts]
 dict = "cli:main"
 dict-daemon = "hotkey_daemon:main"
 
 [tool.setuptools]
-py-modules = ["cli", "dictionary", "hotkey_daemon", "ai_context", "config"]
+py-modules = [
+    "cli",
+    "dictionary",
+    "hotkey_daemon",
+    "ai_context",
+    "config",
+    "history",
+    "offline_dict",
+]
