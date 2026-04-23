@@ -28,7 +28,9 @@ logger = logging.getLogger(__name__)
 DEFAULT_CONFIG: dict = {
     "pronunciation": True,
     "hotkey": "ctrl+shift+d",
+    "search_hotkey": "ctrl+shift+f",
     "ai_enabled": True,
+    "ai_provider": "nvidia",        # "nvidia" | "local"
     "nvidia_model": "nvidia/llama-3.3-nemotron-super-49b-v1",
     "tts_engine": "pyttsx3",
     "tts_rate": 150,
@@ -39,6 +41,9 @@ DEFAULT_CONFIG: dict = {
     "ai_language": "ko",
     "ai_style": "detailed",
     "ai_custom_prompt": "",
+    "theme": "dark",
+    "history_enabled": True,
+    "show_chips": True,
 }
 
 # ------------------------------------------------------------------
